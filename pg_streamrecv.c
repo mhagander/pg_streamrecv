@@ -109,7 +109,7 @@ open_walfile(XLogRecPtr startpoint)
 		printf("Opening segment %s\n", current_walfile_name);
 
 	sprintf(fn, "%s/inprogress/%s", basedir, current_walfile_name);
-	f = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0066);
+	f = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0666);
 	if (f == -1)
 	{
 		fprintf(stderr, "Failed to open wal segment %s: %m", fn);
