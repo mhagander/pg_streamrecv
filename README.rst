@@ -35,6 +35,6 @@ connectionstring
 directory
 	The directory to write WAL files to. pg_streamrecv will automatically create a subdirectory called *inprogress* in this directory, and move all segments into it as they are received.
 
--v
+v
 	Add -v to get more verbose output.
 
