@@ -557,6 +557,16 @@ main(int argc, char *argv[])
 
 		if (r == -1)
 			break;
+		if (r == -2)
+		{
+			fprintf(stderr, "Error reading copy data: %s\n", PQerrorMessage(conn));
+			exit(1);
+		}
+		if (r < STREAMING_HEADER_SIZE + 1)
+		{
+			fprintf(stderr, "Received %i bytes in a copy data block, shorter than the required %i\n", r, STREAMING_HEADER_SIZE + 1);
+			exit(1);
+		}
 		if (copybuf[0] != 'w')
 		{
 			fprintf(stderr, "Received invalid copy data type: %c\n",
