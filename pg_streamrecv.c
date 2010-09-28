@@ -28,25 +28,21 @@
 
 /* Options from the commandline */
 char	   *connstr = NULL;
-
 char	   *basedir = NULL;
-
 int			verbose = 0;
 
 
 /* Other global variables */
 int			timeline;
-
 char		current_walfile_name[64];
-
 char	   *remove_when_passed_name = NULL;
-
 int			remove_when_passed_size;
 
 
 #define ISHEX(x) ((x >= '0' && x <= '9') || (x >= 'A' && x <= 'F'))
 
 #define STREAMING_HEADER_SIZE (1+8+8+8)
+
 
 void
 Usage()
@@ -63,9 +59,7 @@ PGresult *
 start_streaming(PGconn *conn, char *xlogpos)
 {
 	unsigned int uxlogid;
-
 	unsigned int uxrecoff;
-
 	char		buf[64];
 
 	if (sscanf(xlogpos, "%X/%X", &uxlogid, &uxrecoff) != 2)
@@ -99,7 +93,6 @@ static int
 open_walfile(XLogRecPtr startpoint)
 {
 	int			f;
-
 	char		fn[256];
 
 	XLogFileName(current_walfile_name, timeline,
@@ -126,7 +119,6 @@ static void
 rename_current_walfile()
 {
 	char		src[256];
-
 	char		dest[256];
 
 	if (verbose > 1)
@@ -151,7 +143,6 @@ static char *
 filename_to_logpos(char *filename, int add_segment)
 {
 	char		buf[64];
-
 	uint32		tli,
 				log,
 				seg;
@@ -176,15 +167,10 @@ static char *
 get_streaming_start(char *current_xlog)
 {
 	DIR		   *dir;
-
 	struct dirent *dirent;
-
 	char		buf[256];
-
 	char	   *filename = NULL;
-
 	struct stat st;
-
 	int			i;
 
 	/*
@@ -243,7 +229,6 @@ get_streaming_start(char *current_xlog)
 			 * Looks like a segment, double-check characters
 			 */
 			char		src[256];
-
 			char		dest[256];
 
 			for (i = 0; i < 24; i++)
@@ -398,17 +383,11 @@ int
 main(int argc, char *argv[])
 {
 	PGconn	   *conn;
-
 	PGresult   *res;
-
 	char		c;
-
 	char		buf[128];
-
 	char		current_xlog[64];
-
 	int			walfile = -1;
-
 	struct stat st;
 
 	while ((c = getopt(argc, argv, "c:d:v")) != -1)
@@ -548,11 +527,8 @@ main(int argc, char *argv[])
 	while (1)
 	{
 		char	   *copybuf = NULL;
-
 		XLogRecPtr	startpoint;
-
 		int			xlogoff;
-
 		int			r = PQgetCopyData(conn, &copybuf, 0);
 
 		if (r == -1)
