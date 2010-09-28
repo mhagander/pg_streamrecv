@@ -164,7 +164,7 @@ filename_to_logpos(char *filename, int add_segment)
  * 3. Start from the beginning of current WAL segment with a warning
  */
 static char *
-get_streaming_start(char *current_xlog)
+get_streaming_start_point()
 {
 	DIR		   *dir;
 	struct dirent *dirent;
@@ -375,7 +375,7 @@ get_streaming_start(char *current_xlog)
 	 */
 	fprintf(stderr,
 			"Nothing found in archive directory, starting streaming from current position.\n");
-	return current_xlog;
+	return NULL;
 }
 
 
@@ -386,7 +386,7 @@ main(int argc, char *argv[])
 	PGresult   *res;
 	char		c;
 	char		buf[128];
-	char		current_xlog[64];
+	char	   *current_xlog;
 	int			walfile = -1;
 	struct stat st;
 
@@ -449,35 +449,45 @@ main(int argc, char *argv[])
 	}
 
 	/*
-	 * Connect with a regular connection first
+	 * Figure out where to start if there are existing files
+	 * available.
 	 */
-	sprintf(buf, "%s dbname=postgres", connstr);
-	if (verbose > 1)
-		printf("Connecting to '%s'\n", buf);
-
-	conn = PQconnectdb(buf);
-	if (!conn || PQstatus(conn) != CONNECTION_OK)
+	current_xlog = get_streaming_start_point();
+	if (current_xlog == NULL)
 	{
-		fprintf(stderr, "Failed to connect to server: %s\n",
-				PQerrorMessage(conn));
-		exit(1);
-	}
+		/*
+		 * Nothing found in the archive directory, so connect to
+		 * the master and ask for the current xlog location, and
+		 * derive the streaming start point from that.
+		 */
+		sprintf(buf, "%s dbname=postgres", connstr);
+		if (verbose > 1)
+			printf("Connecting to '%s'\n", buf);
 
-	/*
-	 * Get the current xlog location
-	 */
-	res = PQexec(conn, "SELECT pg_current_xlog_location()");
-	if (!res || PQresultStatus(res) != PGRES_TUPLES_OK)
-	{
-		fprintf(stderr, "Failed to get current xlog location: %s\n",
-				PQresultErrorMessage(res));
-		exit(1);
+		conn = PQconnectdb(buf);
+		if (!conn || PQstatus(conn) != CONNECTION_OK)
+		{
+			fprintf(stderr, "Failed to connect to server: %s\n",
+					PQerrorMessage(conn));
+			exit(1);
+		}
+
+		/*
+		 * Get the current xlog location
+		 */
+		res = PQexec(conn, "SELECT pg_current_xlog_location()");
+		if (!res || PQresultStatus(res) != PGRES_TUPLES_OK)
+		{
+			fprintf(stderr, "Failed to get current xlog location: %s\n",
+					PQresultErrorMessage(res));
+			exit(1);
+		}
+		current_xlog = strdup(PQgetvalue(res, 0, 0));
+		if (verbose)
+			printf("Current xlog location: %s\n", current_xlog);
+		PQclear(res);
+		PQfinish(conn);
 	}
-	strcpy(current_xlog, PQgetvalue(res, 0, 0));
-	if (verbose)
-		printf("Current xlog location: %s\n", current_xlog);
-	PQclear(res);
-	PQfinish(conn);
 
 
 	/*
@@ -515,7 +525,7 @@ main(int argc, char *argv[])
 	/*
 	 * Start streaming the log
 	 */
-	res = start_streaming(conn, get_streaming_start(current_xlog));
+	res = start_streaming(conn, current_xlog);
 	if (!res || PQresultStatus(res) != PGRES_COPY_OUT)
 	{
 		fprintf(stderr, "Failed to start replication: %s\n",
