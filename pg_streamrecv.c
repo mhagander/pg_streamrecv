@@ -51,6 +51,29 @@ Usage()
 	exit(1);
 }
 
+static PGconn *
+connect_server(int replication)
+{
+	char buf[MAXPGPATH];
+	PGconn *conn;
+
+	if (replication)
+		sprintf(buf, "%s dbname=replication replication=true", connstr);
+	else
+		sprintf(buf, "%s dbname=postgres", connstr);
+
+	if (verbose > 1)
+		printf("Connecting to '%s'\n", buf);
+	conn = PQconnectdb(buf);
+	if (!conn || PQstatus(conn) != CONNECTION_OK)
+	{
+		fprintf(stderr, "Failed to connect to server for replication: %s\n",
+				PQerrorMessage(conn));
+		exit(1);
+	}
+	return conn;
+}
+
 /*
  * Initiate streaming replication at the given point in the WAL,
  * rounded off to the beginning of the segment it's in.
@@ -460,17 +483,7 @@ main(int argc, char *argv[])
 		 * the master and ask for the current xlog location, and
 		 * derive the streaming start point from that.
 		 */
-		sprintf(buf, "%s dbname=postgres", connstr);
-		if (verbose > 1)
-			printf("Connecting to '%s'\n", buf);
-
-		conn = PQconnectdb(buf);
-		if (!conn || PQstatus(conn) != CONNECTION_OK)
-		{
-			fprintf(stderr, "Failed to connect to server: %s\n",
-					PQerrorMessage(conn));
-			exit(1);
-		}
+		conn = connect_server(0);
 
 		/*
 		 * Get the current xlog location
@@ -493,16 +506,7 @@ main(int argc, char *argv[])
 	/*
 	 * Connect in replication mode to the server
 	 */
-	sprintf(buf, "%s dbname=replication replication=true", connstr);
-	if (verbose > 1)
-		printf("Connecting to '%s'\n", buf);
-	conn = PQconnectdb(buf);
-	if (!conn || PQstatus(conn) != CONNECTION_OK)
-	{
-		fprintf(stderr, "Failed to connect to server for replication: %s\n",
-				PQerrorMessage(conn));
-		exit(1);
-	}
+	conn = connect_server(1);
 
 	/*
 	 * Identify the server and get the timeline
