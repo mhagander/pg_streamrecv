@@ -31,6 +31,7 @@ char	   *connstr = NULL;
 char	   *basedir = NULL;
 int			verbose = 0;
 bool		tarmode = false;
+bool		recoveryconf = false;
 
 
 /* Other global variables */
@@ -161,6 +162,7 @@ Usage()
 	printf("\n");
 	printf(" -c               libpq connection string to connect with\n");
 	printf(" -b <directory>   directory to write base backup to\n");
+	printf(" -r               generate recovery.conf for streaming backup\n");
 	printf(" -t               generate tar file(s) in the directory instead\n");
 	printf("                  of unpacked data directory\n");
 	printf(" -v               verbose\n");
@@ -785,6 +787,20 @@ BaseBackup()
 		ensure_directory_exists(current_path);
 	}
 
+	if (recoveryconf)
+	{
+		sprintf(current_path, "%s/recovery.conf", basedir);
+		tarfile = fopen(current_path, "w");
+		if (!tarfile)
+		{
+			fprintf(stderr, "could not create \"%s\": %m\n", current_path);
+			exit(1);
+		}
+		fprintf(tarfile, "standby_mode=on\n");
+		fprintf(tarfile, "primary_conninfo='%s'\n", connstr);
+		fclose(tarfile);
+	}
+
 	printf("Base backup completed.\n");
 }
 
@@ -1055,7 +1071,7 @@ main(int argc, char *argv[])
 				do_basebackup = false;
 	struct stat st;
 
-	while ((c = getopt(argc, argv, "c:d:b:tv")) != -1)
+	while ((c = getopt(argc, argv, "c:d:b:rtv")) != -1)
 	{
 		switch (c)
 		{
@@ -1072,6 +1088,9 @@ main(int argc, char *argv[])
 				break;
 			case 'v':
 				verbose++;
+				break;
+			case 'r':
+				recoveryconf = true;
 				break;
 			case 't':
 				tarmode = true;
@@ -1115,6 +1134,12 @@ main(int argc, char *argv[])
 			fprintf(stderr, "Tar mode can only be set for base backups\n");
 			exit(1);
 		}
+		if (recoveryconf)
+		{
+			fprintf(stderr, "recovery.conf can only be generated for base backups\n");
+			exit(1);
+		}
+
 		LogStreaming();
 	}
 
