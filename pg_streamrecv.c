@@ -30,6 +30,7 @@
 char	   *connstr = NULL;
 char	   *basedir = NULL;
 int			verbose = 0;
+bool		tarmode = false;
 
 
 /* Other global variables */
@@ -43,11 +44,127 @@ int			remove_when_passed_size;
 
 #define STREAMING_HEADER_SIZE (1+8+8+8)
 
+/*
+ * XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+ * This is from libpgport, use from there when importing
+ * XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+ */
+int
+pg_mkdir_p(char *path, int omode)
+{
+	struct stat sb;
+	mode_t		numask,
+				oumask;
+	int			last,
+				retval;
+	char	   *p;
+
+	retval = 0;
+	p = path;
+
+#ifdef WIN32
+	/* skip network and drive specifiers for win32 */
+	if (strlen(p) >= 2)
+	{
+		if (p[0] == '/' && p[1] == '/')
+		{
+			/* network drive */
+			p = strstr(p + 2, "/");
+			if (p == NULL)
+			{
+				errno = EINVAL;
+				return -1;
+			}
+		}
+		else if (p[1] == ':' &&
+				 ((p[0] >= 'a' && p[0] <= 'z') ||
+				  (p[0] >= 'A' && p[0] <= 'Z')))
+		{
+			/* local drive */
+			p += 2;
+		}
+	}
+#endif
+
+	/*
+	 * POSIX 1003.2: For each dir operand that does not name an existing
+	 * directory, effects equivalent to those caused by the following command
+	 * shall occcur:
+	 *
+	 * mkdir -p -m $(umask -S),u+wx $(dirname dir) && mkdir [-m mode] dir
+	 *
+	 * We change the user's umask and then restore it, instead of doing
+	 * chmod's.  Note we assume umask() can't change errno.
+	 */
+	oumask = umask(0);
+	numask = oumask & ~(S_IWUSR | S_IXUSR);
+	(void) umask(numask);
+
+	if (p[0] == '/')			/* Skip leading '/'. */
+		++p;
+	for (last = 0; !last; ++p)
+	{
+		if (p[0] == '\0')
+			last = 1;
+		else if (p[0] != '/')
+			continue;
+		*p = '\0';
+		if (!last && p[1] == '\0')
+			last = 1;
+
+		if (last)
+			(void) umask(oumask);
+
+		/* check for pre-existing directory */
+		if (stat(path, &sb) == 0)
+		{
+			if (!S_ISDIR(sb.st_mode))
+			{
+				if (last)
+					errno = EEXIST;
+				else
+					errno = ENOTDIR;
+				retval = -1;
+				break;
+			}
+		}
+		else if (mkdir(path, last ? omode : S_IRWXU | S_IRWXG | S_IRWXO) < 0)
+		{
+			retval = -1;
+			break;
+		}
+		if (!last)
+			*p = '/';
+	}
+
+	/* ensure we restored umask */
+	(void) umask(oumask);
+
+	return retval;
+}
+
 
 void
 Usage()
 {
-	printf("Usage: pg_streamrecv -c <connectionstring> -d <directory> [-v]\n");
+	printf("Usage:\n");
+	printf("\n");
+	printf("Streaming mode:\n");
+    printf(" pg_streamrecv -c <connectionstring> -d <directory> [-v]\n");
+	printf("\n");
+	printf(" -c <str>         libpq connection string to connect with\n");
+	printf(" -d <directory>   directory to write WAL files to\n");
+	printf(" -v               verbose\n");
+	printf("\n");
+	printf("Base backup mode:\n");
+	printf(" pg_streamrecv -c <connectionstring> -b <directory> [-t] [-v]\n");
+	printf("\n");
+	printf(" -c               libpq connection string to connect with\n");
+	printf(" -b <directory>   directory to write base backup to\n");
+	printf(" -t               generate tar file(s) in the directory instead\n");
+	printf("                  of unpacked data directory\n");
+	printf(" -v               verbose\n");
+	printf("\n");
 	exit(1);
 }
 
@@ -401,51 +518,286 @@ get_streaming_start_point()
 	return NULL;
 }
 
-
-int
-main(int argc, char *argv[])
+static void
+verify_dir_is_empty(char *dirname)
 {
-	PGconn	   *conn;
-	PGresult   *res;
-	char		c;
-	char		buf[128];
-	char	   *current_xlog;
-	int			walfile = -1;
-	struct stat st;
+	DIR *d = opendir(dirname);
+	struct dirent *de;
 
-	while ((c = getopt(argc, argv, "c:d:v")) != -1)
+	if (!d)
 	{
-		switch (c)
+		fprintf(stderr, "Directory '%s' does not exist\n", dirname);
+		exit(1);
+	}
+
+	while ((de = readdir(d)) != NULL)
+	{
+		if (strcmp(de->d_name, ".") == 0 ||
+			strcmp(de->d_name, "..") == 0)
+			continue;
+		fprintf(stderr, "Directory '%s' is not empty!\n", dirname);
+		exit(1);
+	}
+	closedir(d);
+}
+
+static void
+ensure_directory_exists(char *filename)
+{
+	char path[MAXPGPATH];
+	char *c;
+
+	strcpy(path, filename);
+	c = strrchr(path, '/');
+	if (!c)
+		return; /* No path in it, so assume exists */
+	*c = '\0';
+
+	if (access(path, R_OK | X_OK) != 0)
+	{
+		if (pg_mkdir_p(path, S_IRWXU) != 0)
 		{
-			case 'c':
-				connstr = strdup(optarg);
-				break;
-			case 'd':
-				basedir = strdup(optarg);
-				break;
-			case 'v':
-				verbose++;
-				break;
-			default:
-				Usage();
+			fprintf(stderr, "Failed to create directory %s: %m", path);
+		}
+	}
+}
+
+
+static void
+BaseBackup()
+{
+	PGconn *conn;
+	PGresult *res;
+	FILE *tarfile = NULL;
+	char current_path[MAXPGPATH];
+	bool firstchunk = true;
+	int current_len_left;
+	int current_padding;
+
+	/*
+	 * Connect in replication mode to the server
+	 */
+	conn = connect_server(1);
+
+	res = PQexec(conn, "BASE_BACKUP pg_streamrecv base backup");
+	if (!res || PQresultStatus(res) != PGRES_COPY_OUT)
+	{
+		fprintf(stderr, "Failed to start base backup: %s\n",
+				PQresultErrorMessage(res));
+		exit(1);
+	}
+	PQclear(res);
+
+
+	/*
+	 * Start receiving chunks
+	 */
+	while (1)
+	{
+		char *copybuf = NULL;
+
+		int r = PQgetCopyData(conn, &copybuf, 0);
+
+		if (r == -1)
+		{
+			/*
+			 * End of this chunk, close the current file
+			 * (both in tar and non-tar mode)
+			 */
+			if (tarfile)
+			{
+				fclose(tarfile);
+				tarfile = NULL;
+			}
+
+			firstchunk = true;
+
+			/*
+			 * See if there is another chunk to be had
+			 */
+			res = PQgetResult(conn);
+			if (PQresultStatus(res) == PGRES_COPY_OUT)
+			{
+				/* Another copy result coming -- another chunk */
+				PQclear(res);
+				continue;
+			}
+			if (PQresultStatus(res) != PGRES_COMMAND_OK)
+			{
+				fprintf(stderr, "Base backup error: %s\n",
+						PQresultErrorMessage(res));
 				exit(1);
+			}
+
+			/* Completed successfully */
+			break;
+		}
+		else if (r == -2)
+		{
+			fprintf(stderr, "Error reading copy data: %s\n",
+					PQerrorMessage(conn));
+			exit(1);
+		}
+
+		/* Received a chunk of data */
+		if (firstchunk)
+		{
+			/*
+			 * First block in chunk - contains header
+			 */
+			char fn[128];
+
+			/*
+			 * Receiving header, format is:
+			 * <oid>;<fullpath>
+			 * with both being empty for base directory
+			 */
+			if (strcmp(copybuf, ";") == 0)
+			{
+				/* base directory */
+				if (tarmode)
+					sprintf(fn, "%s/base.tar", basedir);
+				else
+					strcpy(current_path, basedir);
+			}
+			else
+			{
+				/* tablespace */
+				char *c = strchr(copybuf, ';');
+				if (c == NULL)
+				{
+					fprintf(stderr, "Invalid chunk header: '%s'\n", copybuf);
+					exit(1);
+				}
+
+				*c = '\0';
+				if (tarmode)
+					sprintf(fn, "%s/%s.tar", basedir, copybuf);
+				else
+					strcpy(current_path, c+1);
+			}
+
+			if (tarmode)
+				tarfile = fopen(fn, "wb");
+			else
+				verify_dir_is_empty(current_path);
+
+			firstchunk = false;
+			continue;
+		}
+
+		if (tarmode)
+			fwrite(copybuf, r, 1, tarfile);
+		else
+		{
+			if (tarfile == NULL)
+			{
+				char fn[MAXPGPATH];
+
+				/* No current file, so this must be a header */
+				if (r != 512)
+				{
+					fprintf(stderr, "Invalid block header size: %i\n", r);
+					exit(1);
+				}
+
+				if (sscanf(copybuf + 124, "%11o", &current_len_left) != 1)
+				{
+					fprintf(stderr, "Failed to parse file size\n");
+					exit(1);
+				}
+				current_padding = ((current_len_left + 511) & ~511) - current_len_left;
+
+				sprintf(fn, "%s/%s", current_path, copybuf);
+				ensure_directory_exists(fn);
+				tarfile = fopen(fn, "wb");
+				/* XXX: Set permissions on file? Owner? */
+				if (!tarfile)
+				{
+					fprintf(stderr, "Failed to create file '%s': %m\n", copybuf);
+					exit(1);
+				}
+
+				if (current_len_left == 0)
+				{
+					fclose(tarfile);
+					tarfile = NULL;
+
+					/* Next block is going to be a new header */
+					continue;
+				}
+
+			}
+			else
+			{
+				/* Continuing a file */
+				if (current_len_left == 0 && r == current_padding)
+				{
+					/* Received padding! */
+					fclose(tarfile);
+					tarfile = NULL;
+					continue;
+				}
+				if (r > current_len_left)
+				{
+					fprintf(stderr, "Received block size %i, but only %i remaining.\n", r, current_len_left);
+					exit(1);
+				}
+
+				fwrite(copybuf, r, 1, tarfile);
+
+				current_len_left -= r;
+				if (current_len_left == 0 && current_padding == 0)
+				{
+					/* No padding, and we're done */
+					fclose(tarfile);
+					tarfile = NULL;
+				}
+			}
+		}
+		PQfreemem(copybuf);
+	}
+
+	if (tarfile != NULL)
+	{
+		printf("tarfile != null\n");
+		fclose(tarfile);
+		if (current_len_left != 0)
+		{
+			fprintf(stderr, "Last file was never finished!\n");
+			exit(1);
 		}
 	}
 
-	if (optind != argc)
-		Usage();
-
-	if (!connstr || !basedir)
-		Usage();
+	/*
+	 * End of copy data. Final result is already checked inside the loop.
+	 */
+	PQfinish(conn);
 
 	/*
-	 * Verify that the archive dir exists
+	 * Create directories that are excluded in the dump
 	 */
-	if (stat(basedir, &st) != 0 || !S_ISDIR(st.st_mode))
+	if (!tarmode)
 	{
-		fprintf(stderr, "Base directory %s does not exist\n", basedir);
-		exit(1);
+		sprintf(current_path, "%s/pg_xlog/dummy", basedir);
+		ensure_directory_exists(current_path);
+		sprintf(current_path, "%s/pg_tblspc/dummy", basedir);
+		ensure_directory_exists(current_path);
 	}
+
+	printf("Base backup completed.\n");
+}
+
+
+static void
+LogStreaming(void)
+{
+	PGconn	   *conn;
+	PGresult   *res;
+	char	   *current_xlog;
+	int			walfile = -1;
+	char		buf[128];
+	struct stat st;
 
 	/*
 	 * Create inprogress directory if it does not exist
@@ -530,7 +882,8 @@ main(int argc, char *argv[])
 	 * Start streaming the log
 	 */
 	res = start_streaming(conn, current_xlog);
-	if (!res || PQresultStatus(res) != PGRES_COPY_OUT)
+	if (!res ||
+		(PQresultStatus(res) != PGRES_COPY_OUT && PQresultStatus(res) != PGRES_COPY_BOTH))
 	{
 		fprintf(stderr, "Failed to start replication: %s\n",
 				PQresultErrorMessage(res));
@@ -692,6 +1045,78 @@ main(int argc, char *argv[])
 
 	if (verbose)
 		printf("Replication stream finished.\n");
+}
+
+int
+main(int argc, char *argv[])
+{
+	char		c;
+	bool		do_logstream = false,
+				do_basebackup = false;
+	struct stat st;
+
+	while ((c = getopt(argc, argv, "c:d:b:tv")) != -1)
+	{
+		switch (c)
+		{
+			case 'c':
+				connstr = strdup(optarg);
+				break;
+			case 'd':
+				basedir = strdup(optarg);
+				do_logstream = true;
+				break;
+			case 'b':
+				basedir = strdup(optarg);
+				do_basebackup = true;
+				break;
+			case 'v':
+				verbose++;
+				break;
+			case 't':
+				tarmode = true;
+				break;
+			default:
+				Usage();
+				exit(1);
+		}
+	}
+
+	if (optind != argc)
+		Usage();
+
+	if (!connstr || !basedir)
+		Usage();
+
+	if (do_basebackup && do_logstream)
+	{
+		fprintf(stderr, "Can't do both base backup and log streaming at once!\n");
+		exit(1);
+	}
+
+	/*
+	 * Verify that the target directory exists
+	 */
+	if (stat(basedir, &st) != 0 || !S_ISDIR(st.st_mode))
+	{
+		fprintf(stderr, "Base directory %s does not exist\n", basedir);
+		exit(1);
+	}
+
+	if (do_basebackup)
+	{
+		BaseBackup();
+		exit(0);
+	}
+	else
+	{
+		if (tarmode)
+		{
+			fprintf(stderr, "Tar mode can only be set for base backups\n");
+			exit(1);
+		}
+		LogStreaming();
+	}
 
 	return 0;
 }
