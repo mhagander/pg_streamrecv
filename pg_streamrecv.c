@@ -453,7 +453,6 @@ BaseBackup()
 	PGresult *res;
 	FILE *tarfile = NULL;
 	char current_path[MAXPGPATH];
-	bool firstchunk = true;
 	int current_len_left;
 	int current_padding;
 	int spacesize = 0;
@@ -466,229 +465,103 @@ BaseBackup()
 
 	sprintf(current_path, "BASE_BACKUP %s;pg_streamrecv base backup",
 			showprogress?"PROGRESS":"");
-	res = PQexec(conn, current_path);
-	if (!res || PQresultStatus(res) != PGRES_COPY_OUT)
+	if (PQsendQuery(conn, current_path) == 0)
 	{
 		fprintf(stderr, "Failed to start base backup: %s\n",
-				PQresultErrorMessage(res));
+				PQerrorMessage(conn));
 		exit(1);
 	}
-	PQclear(res);
-
 
 	/*
 	 * Start receiving chunks
 	 */
 	while (1)
 	{
-		char *copybuf = NULL;
+		char fn[MAXPGPATH];
 
-		int r = PQgetCopyData(conn, &copybuf, 0);
-
-		if (r == -1)
-		{
-			/*
-			 * End of this chunk, close the current file
-			 * (both in tar and non-tar mode)
-			 */
-			if (tarfile)
-			{
-				fclose(tarfile);
-				tarfile = NULL;
-			}
-
-			firstchunk = true;
-
-			/*
-			 * See if there is another chunk to be had
-			 */
-			res = PQgetResult(conn);
-			if (PQresultStatus(res) == PGRES_COPY_OUT)
-			{
-				/* Another copy result coming -- another chunk */
-				PQclear(res);
-				continue;
-			}
-			if (PQresultStatus(res) != PGRES_COMMAND_OK)
-			{
-				fprintf(stderr, "Base backup error: %s\n",
-						PQresultErrorMessage(res));
-				exit(1);
-			}
-
-			/* Completed successfully */
+		res = PQgetResult(conn);
+		if (res == NULL)
+			/* Last resultset has been received. We're done here. */
 			break;
-		}
-		else if (r == -2)
+
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		{
-			fprintf(stderr, "Error reading copy data: %s\n",
+			printf("Result status: %i\n", PQresultStatus(res));
+			fprintf(stderr, "Failed to get first result: %s\n",
+					PQerrorMessage(conn));
+			exit(1);
+		}
+		if (PQgetisnull(res, 0, 0))
+		{
+			if (tarmode)
+				sprintf(fn, "%s/base.tar", basedir);
+			else
+				strcpy(current_path, basedir);
+		}
+		else
+		{
+			/* non-default tablespace */
+			if (tarmode)
+				sprintf(fn, "%s/%s.tar", basedir, PQgetvalue(res, 0, 0));
+			else
+				strcpy(current_path, PQgetvalue(res, 0, 1));
+		}
+		spacesize = atol(PQgetvalue(res, 0, 2));
+		donesize = 0;
+		PQclear(res);
+
+		if (tarmode)
+			tarfile = fopen(fn, "wb");
+		else
+			verify_dir_is_empty(current_path);
+
+		res = PQgetResult(conn);
+		if (res == NULL || PQresultStatus(res) != PGRES_COPY_OUT)
+		{
+			fprintf(stderr, "Failed to get copy out: %s\n",
 					PQerrorMessage(conn));
 			exit(1);
 		}
 
-		/* Received a chunk of data */
-		if (firstchunk)
+		while (1)
 		{
-			/*
-			 * First block in chunk - contains header
-			 */
-			char fn[128];
-			char *c;
+			char *copybuf = NULL;
 
-			/*
-			 * Receiving header, format is:
-			 * <oid>;<fullpath>;<size>
-			 * with both being empty for base directory
-			 */
-			if (strncmp(copybuf, ";;", 2) == 0)
+			int r = PQgetCopyData(conn, &copybuf, 0);
+
+			if (r == -1)
 			{
-				/* base directory */
-				if (tarmode)
-					sprintf(fn, "%s/base.tar", basedir);
-				else
-					strcpy(current_path, basedir);
-			}
-			else
-			{
-				/* tablespace */
-				c = strchr(copybuf, ';');
-				if (c == NULL)
+				/*
+				 * End of this chunk, close the current file
+				 * (both in tar and non-tar mode)
+				 */
+				if (tarfile)
 				{
-					fprintf(stderr, "Invalid chunk header: '%s'\n", copybuf);
-					exit(1);
+					fclose(tarfile);
+					tarfile = NULL;
 				}
 
-				*c = '\0';
-				if (tarmode)
-					sprintf(fn, "%s/%s.tar", basedir, copybuf);
-				else
-					strcpy(current_path, c+1);
-				*c = ';';
+				/*
+				 * Need to check the result of this COPY
+				 */
+				res = PQgetResult(conn);
+				if (!res || PQresultStatus(res) != PGRES_COMMAND_OK)
+				{
+					fprintf(stderr, "Chunk receive error: %s\n",
+							PQerrorMessage(conn));
+					exit(1);
+				}
+				break;
 			}
-
-			/* Look for the size as the last part of the string */
-			c = strrchr(copybuf, ';');
-			if (c == NULL)
+			else if (r == -2)
 			{
-				fprintf(stderr, "Invalid chunk header: '%s'\n", copybuf);
+				fprintf(stderr, "Error reading copy data: %s\n",
+						PQerrorMessage(conn));
 				exit(1);
 			}
-			c++; /* Move past semicolon */
-			spacesize = strtol(c, NULL, 10);
-			donesize = 0;
 
 			if (tarmode)
-				tarfile = fopen(fn, "wb");
-			else
-				verify_dir_is_empty(current_path);
-
-			firstchunk = false;
-			continue;
-		}
-
-		if (tarmode)
-		{
-			fwrite(copybuf, r, 1, tarfile);
-			if (showprogress)
 			{
-				donesize += r;
-				if (!verbose)
-					/* Don't mix progress report with verbose output */
-					printf("Completed %i/%i kB (%i%%)\r",
-						   donesize / 1024, spacesize,
-						   (donesize / 1024) * 100 / spacesize);
-			}
-		}
-		else
-		{
-			if (tarfile == NULL)
-			{
-				char fn[MAXPGPATH];
-
-				/* No current file, so this must be a header */
-				if (r != 512)
-				{
-					fprintf(stderr, "Invalid block header size: %i\n", r);
-					exit(1);
-				}
-
-				if (sscanf(copybuf + 124, "%11o", &current_len_left) != 1)
-				{
-					fprintf(stderr, "Failed to parse file size\n");
-					exit(1);
-				}
-				current_padding = ((current_len_left + 511) & ~511) - current_len_left;
-
-				sprintf(fn, "%s/%s", current_path, copybuf);
-				if (fn[strlen(fn)-1] == '/')
-				{
-					/* Ends in a slash means directory or symlink to directory */
-					if (copybuf[156] == '5')
-					{
-						/* Directory */
-						fn[strlen(fn)-1] = '\0'; /* Remove trailing slash */
-						if (mkdir(fn, S_IRWXU) != 0) /* XXX: permissions */
-						{
-							fprintf(stderr, "Could not create directory \"%s\": %m",
-									fn);
-							exit(1);
-						}
-					}
-					else if (copybuf[156] == '2')
-					{
-						/* Symbolic link */
-						fprintf(stderr, "Don't know how to deal with symbolic link yet\n");
-						exit(1);
-					}
-					else
-					{
-						fprintf(stderr, "Unknown link indicaator %c\n",
-								copybuf[156]);
-						exit(1);
-					}
-					continue;
-				}
-
-				tarfile = fopen(fn, "wb");
-				/* XXX: Set permissions on file? Owner? */
-				if (!tarfile)
-				{
-					fprintf(stderr, "Failed to create file '%s': %m\n", copybuf);
-					exit(1);
-				}
-
-				if (verbose)
-					printf("Writing file %s (size %i kB, done %i / %i kB (%i%%))\n",
-						   fn, current_len_left / 1024,
-						   donesize / 1024, spacesize,
-						   (donesize / 1024) * 100 / spacesize);
-
-				if (current_len_left == 0)
-				{
-					fclose(tarfile);
-					tarfile = NULL;
-
-					/* Next block is going to be a new header */
-					continue;
-				}
-
-			}
-			else
-			{
-				/* Continuing a file */
-				if (current_len_left == 0 && r == current_padding)
-				{
-					/* Received padding! */
-					fclose(tarfile);
-					tarfile = NULL;
-					continue;
-				}
-				if (r > current_len_left)
-				{
-					fprintf(stderr, "Received block size %i, but only %i remaining.\n", r, current_len_left);
-					exit(1);
-				}
-
 				fwrite(copybuf, r, 1, tarfile);
 				if (showprogress)
 				{
@@ -699,18 +572,121 @@ BaseBackup()
 							   donesize / 1024, spacesize,
 							   (donesize / 1024) * 100 / spacesize);
 				}
-
-				current_len_left -= r;
-				if (current_len_left == 0 && current_padding == 0)
+			}
+			else
+			{
+				/* Parse the tarfile contents */
+				if (tarfile == NULL)
 				{
-					/* No padding, and we're done */
-					fclose(tarfile);
-					tarfile = NULL;
+					char fn[MAXPGPATH];
+
+					/* No current file, so this must be a header */
+					if (r != 512)
+					{
+						fprintf(stderr, "Invalid block header size: %i\n", r);
+						exit(1);
+					}
+
+					if (sscanf(copybuf + 124, "%11o", &current_len_left) != 1)
+					{
+						fprintf(stderr, "Failed to parse file size\n");
+						exit(1);
+					}
+					current_padding = ((current_len_left + 511) & ~511) - current_len_left;
+
+					sprintf(fn, "%s/%s", current_path, copybuf);
+					if (fn[strlen(fn)-1] == '/')
+					{
+						/* Ends in a slash means directory or symlink to directory */
+						if (copybuf[156] == '5')
+						{
+							/* Directory */
+							fn[strlen(fn)-1] = '\0'; /* Remove trailing slash */
+							if (mkdir(fn, S_IRWXU) != 0) /* XXX: permissions */
+							{
+								fprintf(stderr, "Could not create directory \"%s\": %m",
+										fn);
+								exit(1);
+							}
+						}
+						else if (copybuf[156] == '2')
+						{
+							/* Symbolic link */
+							fprintf(stderr, "Don't know how to deal with symbolic link yet\n");
+							exit(1);
+						}
+						else
+						{
+							fprintf(stderr, "Unknown link indicaator %c\n",
+									copybuf[156]);
+							exit(1);
+						}
+						continue;
+					}
+
+					tarfile = fopen(fn, "wb");
+					/* XXX: Set permissions on file? Owner? */
+					if (!tarfile)
+					{
+						fprintf(stderr, "Failed to create file '%s': %m\n", copybuf);
+						exit(1);
+					}
+
+					if (verbose)
+						printf("Writing file %s (size %i kB, total done %i / %i kB (%i%%))\n",
+							   fn, current_len_left / 1024,
+							   donesize / 1024, spacesize,
+							   (donesize / 1024) * 100 / spacesize);
+
+					if (current_len_left == 0)
+					{
+						fclose(tarfile);
+						tarfile = NULL;
+
+						/* Next block is going to be a new header */
+						continue;
+					}
+
+				} /* tarfile == null */
+				else
+				{
+					/* Continuing a file */
+					if (current_len_left == 0 && r == current_padding)
+					{
+						/* Received padding! */
+						fclose(tarfile);
+						tarfile = NULL;
+						continue;
+					}
+					if (r > current_len_left)
+					{
+						fprintf(stderr, "Received block size %i, but only %i remaining.\n", r, current_len_left);
+						exit(1);
+					}
+
+					fwrite(copybuf, r, 1, tarfile);
+					if (showprogress)
+					{
+						donesize += r;
+						if (!verbose)
+							/* Don't mix progress report with verbose output */
+							printf("Completed %i/%i kB (%i%%)\r",
+								   donesize / 1024, spacesize,
+								   (donesize / 1024) * 100 / spacesize);
+					}
+
+					current_len_left -= r;
+					if (current_len_left == 0 && current_padding == 0)
+					{
+						/* No padding, and we're done */
+						fclose(tarfile);
+						tarfile = NULL;
+					}
 				}
 			}
-		}
-		PQfreemem(copybuf);
-	}
+			PQfreemem(copybuf);
+		} /* Looping over copy data */
+	} /* Loop over all tablespaces */
 
 	if (tarfile != NULL)
 	{
