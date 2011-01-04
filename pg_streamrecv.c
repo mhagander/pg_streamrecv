@@ -32,6 +32,7 @@ char	   *basedir = NULL;
 int			verbose = 0;
 bool		tarmode = false;
 bool		recoveryconf = false;
+bool		showprogress = false;
 
 
 /* Other global variables */
@@ -62,6 +63,7 @@ Usage()
 	printf("\n");
 	printf(" -c               libpq connection string to connect with\n");
 	printf(" -b <directory>   directory to write base backup to\n");
+	printf(" -p               show progress indicator (slower)\n");
 	printf(" -r               generate recovery.conf for streaming backup\n");
 	printf(" -t               generate tar file(s) in the directory instead\n");
 	printf("                  of unpacked data directory\n");
@@ -454,13 +456,17 @@ BaseBackup()
 	bool firstchunk = true;
 	int current_len_left;
 	int current_padding;
+	int spacesize = 0;
+	int donesize = 0;
 
 	/*
 	 * Connect in replication mode to the server
 	 */
 	conn = connect_server(1);
 
-	res = PQexec(conn, "BASE_BACKUP pg_streamrecv base backup");
+	sprintf(current_path, "BASE_BACKUP %s;pg_streamrecv base backup",
+			showprogress?"PROGRESS":"");
+	res = PQexec(conn, current_path);
 	if (!res || PQresultStatus(res) != PGRES_COPY_OUT)
 	{
 		fprintf(stderr, "Failed to start base backup: %s\n",
@@ -527,13 +533,14 @@ BaseBackup()
 			 * First block in chunk - contains header
 			 */
 			char fn[128];
+			char *c;
 
 			/*
 			 * Receiving header, format is:
-			 * <oid>;<fullpath>
+			 * <oid>;<fullpath>;<size>
 			 * with both being empty for base directory
 			 */
-			if (strcmp(copybuf, ";") == 0)
+			if (strncmp(copybuf, ";;", 2) == 0)
 			{
 				/* base directory */
 				if (tarmode)
@@ -544,7 +551,7 @@ BaseBackup()
 			else
 			{
 				/* tablespace */
-				char *c = strchr(copybuf, ';');
+				c = strchr(copybuf, ';');
 				if (c == NULL)
 				{
 					fprintf(stderr, "Invalid chunk header: '%s'\n", copybuf);
@@ -556,7 +563,19 @@ BaseBackup()
 					sprintf(fn, "%s/%s.tar", basedir, copybuf);
 				else
 					strcpy(current_path, c+1);
+				*c = ';';
 			}
+
+			/* Look for the size as the last part of the string */
+			c = strrchr(copybuf, ';');
+			if (c == NULL)
+			{
+				fprintf(stderr, "Invalid chunk header: '%s'\n", copybuf);
+				exit(1);
+			}
+			c++; /* Move past semicolon */
+			spacesize = strtol(c, NULL, 10);
+			donesize = 0;
 
 			if (tarmode)
 				tarfile = fopen(fn, "wb");
@@ -568,7 +587,18 @@ BaseBackup()
 		}
 
 		if (tarmode)
+		{
 			fwrite(copybuf, r, 1, tarfile);
+			if (showprogress)
+			{
+				donesize += r;
+				if (!verbose)
+					/* Don't mix progress report with verbose output */
+					printf("Completed %i/%i kB (%i%%)\r",
+						   donesize / 1024, spacesize,
+						   (donesize / 1024) * 100 / spacesize);
+			}
+		}
 		else
 		{
 			if (tarfile == NULL)
@@ -627,6 +657,12 @@ BaseBackup()
 					exit(1);
 				}
 
+				if (verbose)
+					printf("Writing file %s (size %i kB, done %i / %i kB (%i%%))\n",
+						   fn, current_len_left / 1024,
+						   donesize / 1024, spacesize,
+						   (donesize / 1024) * 100 / spacesize);
+
 				if (current_len_left == 0)
 				{
 					fclose(tarfile);
@@ -654,6 +690,15 @@ BaseBackup()
 				}
 
 				fwrite(copybuf, r, 1, tarfile);
+				if (showprogress)
+				{
+					donesize += r;
+					if (!verbose)
+						/* Don't mix progress report with verbose output */
+						printf("Completed %i/%i kB (%i%%)\r",
+							   donesize / 1024, spacesize,
+							   (donesize / 1024) * 100 / spacesize);
+				}
 
 				current_len_left -= r;
 				if (current_len_left == 0 && current_padding == 0)
@@ -676,6 +721,9 @@ BaseBackup()
 			exit(1);
 		}
 	}
+
+	if (showprogress && !verbose)
+		printf("\n"); /* Need to move to next line */
 
 	/*
 	 * End of copy data. Final result is already checked inside the loop.
@@ -977,7 +1025,7 @@ main(int argc, char *argv[])
 				do_basebackup = false;
 	struct stat st;
 
-	while ((c = getopt(argc, argv, "c:d:b:rtv")) != -1)
+	while ((c = getopt(argc, argv, "c:d:b:prtv")) != -1)
 	{
 		switch (c)
 		{
@@ -994,6 +1042,9 @@ main(int argc, char *argv[])
 				break;
 			case 'v':
 				verbose++;
+				break;
+			case 'p':
+				showprogress = true;
 				break;
 			case 'r':
 				recoveryconf = true;
@@ -1043,6 +1094,11 @@ main(int argc, char *argv[])
 		if (recoveryconf)
 		{
 			fprintf(stderr, "recovery.conf can only be generated for base backups\n");
+			exit(1);
+		}
+		if (showprogress)
+		{
+			fprintf(stderr, "progress report can only be shown for base backups\n");
 			exit(1);
 		}
 
