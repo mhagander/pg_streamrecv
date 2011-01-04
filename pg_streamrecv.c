@@ -45,106 +45,6 @@ int			remove_when_passed_size;
 
 #define STREAMING_HEADER_SIZE (1+8+8+8)
 
-/*
- * XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
- * This is from libpgport, use from there when importing
- * XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
- */
-int
-pg_mkdir_p(char *path, int omode)
-{
-	struct stat sb;
-	mode_t		numask,
-				oumask;
-	int			last,
-				retval;
-	char	   *p;
-
-	retval = 0;
-	p = path;
-
-#ifdef WIN32
-	/* skip network and drive specifiers for win32 */
-	if (strlen(p) >= 2)
-	{
-		if (p[0] == '/' && p[1] == '/')
-		{
-			/* network drive */
-			p = strstr(p + 2, "/");
-			if (p == NULL)
-			{
-				errno = EINVAL;
-				return -1;
-			}
-		}
-		else if (p[1] == ':' &&
-				 ((p[0] >= 'a' && p[0] <= 'z') ||
-				  (p[0] >= 'A' && p[0] <= 'Z')))
-		{
-			/* local drive */
-			p += 2;
-		}
-	}
-#endif
-
-	/*
-	 * POSIX 1003.2: For each dir operand that does not name an existing
-	 * directory, effects equivalent to those caused by the following command
-	 * shall occcur:
-	 *
-	 * mkdir -p -m $(umask -S),u+wx $(dirname dir) && mkdir [-m mode] dir
-	 *
-	 * We change the user's umask and then restore it, instead of doing
-	 * chmod's.  Note we assume umask() can't change errno.
-	 */
-	oumask = umask(0);
-	numask = oumask & ~(S_IWUSR | S_IXUSR);
-	(void) umask(numask);
-
-	if (p[0] == '/')			/* Skip leading '/'. */
-		++p;
-	for (last = 0; !last; ++p)
-	{
-		if (p[0] == '\0')
-			last = 1;
-		else if (p[0] != '/')
-			continue;
-		*p = '\0';
-		if (!last && p[1] == '\0')
-			last = 1;
-
-		if (last)
-			(void) umask(oumask);
-
-		/* check for pre-existing directory */
-		if (stat(path, &sb) == 0)
-		{
-			if (!S_ISDIR(sb.st_mode))
-			{
-				if (last)
-					errno = EEXIST;
-				else
-					errno = ENOTDIR;
-				retval = -1;
-				break;
-			}
-		}
-		else if (mkdir(path, last ? omode : S_IRWXU | S_IRWXG | S_IRWXO) < 0)
-		{
-			retval = -1;
-			break;
-		}
-		if (!last)
-			*p = '/';
-	}
-
-	/* ensure we restored umask */
-	(void) umask(oumask);
-
-	return retval;
-}
-
-
 void
 Usage()
 {
@@ -543,27 +443,6 @@ verify_dir_is_empty(char *dirname)
 	closedir(d);
 }
 
-static void
-ensure_directory_exists(char *filename)
-{
-	char path[MAXPGPATH];
-	char *c;
-
-	strcpy(path, filename);
-	c = strrchr(path, '/');
-	if (!c)
-		return; /* No path in it, so assume exists */
-	*c = '\0';
-
-	if (access(path, R_OK | X_OK) != 0)
-	{
-		if (pg_mkdir_p(path, S_IRWXU) != 0)
-		{
-			fprintf(stderr, "Failed to create directory %s: %m", path);
-		}
-	}
-}
-
 
 static void
 BaseBackup()
@@ -711,7 +590,35 @@ BaseBackup()
 				current_padding = ((current_len_left + 511) & ~511) - current_len_left;
 
 				sprintf(fn, "%s/%s", current_path, copybuf);
-				ensure_directory_exists(fn);
+				if (fn[strlen(fn)-1] == '/')
+				{
+					/* Ends in a slash means directory or symlink to directory */
+					if (copybuf[156] == '5')
+					{
+						/* Directory */
+						fn[strlen(fn)-1] = '\0'; /* Remove trailing slash */
+						if (mkdir(fn, S_IRWXU) != 0) /* XXX: permissions */
+						{
+							fprintf(stderr, "Could not create directory \"%s\": %m",
+									fn);
+							exit(1);
+						}
+					}
+					else if (copybuf[156] == '2')
+					{
+						/* Symbolic link */
+						fprintf(stderr, "Don't know how to deal with symbolic link yet\n");
+						exit(1);
+					}
+					else
+					{
+						fprintf(stderr, "Unknown link indicaator %c\n",
+								copybuf[156]);
+						exit(1);
+					}
+					continue;
+				}
+
 				tarfile = fopen(fn, "wb");
 				/* XXX: Set permissions on file? Owner? */
 				if (!tarfile)
@@ -762,7 +669,6 @@ BaseBackup()
 
 	if (tarfile != NULL)
 	{
-		printf("tarfile != null\n");
 		fclose(tarfile);
 		if (current_len_left != 0)
 		{
@@ -781,10 +687,10 @@ BaseBackup()
 	 */
 	if (!tarmode)
 	{
-		sprintf(current_path, "%s/pg_xlog/dummy", basedir);
-		ensure_directory_exists(current_path);
-		sprintf(current_path, "%s/pg_tblspc/dummy", basedir);
-		ensure_directory_exists(current_path);
+		sprintf(current_path, "%s/pg_xlog", basedir);
+		mkdir(current_path, S_IRWXU);
+		sprintf(current_path, "%s/pg_tblspc", basedir);
+		mkdir(current_path, S_IRWXU);
 	}
 
 	if (recoveryconf)
