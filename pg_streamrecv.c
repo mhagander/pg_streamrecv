@@ -446,6 +446,26 @@ verify_dir_is_empty(char *dirname)
 }
 
 static void
+CheckPGResult(PGconn *conn, PGresult *res, char *operation, int expected)
+{
+	if (res == NULL)
+	{
+		fprintf(stderr, "Failed to %s: %s\n",
+				operation,
+				PQerrorMessage(conn));
+		exit(1);
+	}
+
+	if (PQresultStatus(res) != expected)
+	{
+		fprintf(stderr, "Failed to %s: %s\n",
+				operation,
+				PQresultErrorMessage(res));
+		exit(1);
+	}
+}
+
+static void
 ReceiveTarFile(PGconn *conn, PGresult *res)
 {
 	char fn[MAXPGPATH];
@@ -468,12 +488,7 @@ ReceiveTarFile(PGconn *conn, PGresult *res)
 
 	/* Get the COPY data stream */
 	res = PQgetResult(conn);
-	if (res == NULL || PQresultStatus(res) != PGRES_COPY_OUT)
-	{
-		fprintf(stderr, "Failed to get copy out: %s\n",
-				PQerrorMessage(conn));
-		exit(1);
-	}
+	CheckPGResult(conn, res, "get copy out", PGRES_COPY_OUT);
 
 	while (1)
 	{
@@ -493,12 +508,7 @@ ReceiveTarFile(PGconn *conn, PGresult *res)
 
 			/* There will be a second result telling us how the COPY went */
 			res = PQgetResult(conn);
-			if (!res || PQresultStatus(res) != PGRES_COMMAND_OK)
-			{
-				fprintf(stderr, "Chunk receive error: %s\n",
-						PQerrorMessage(conn));
-				exit(1);
-			}
+			CheckPGResult(conn, res, "receive chunk", PGRES_COMMAND_OK);
 			break;
 		}
 		else if (r == -2)
@@ -522,6 +532,7 @@ ReceiveTarFile(PGconn *conn, PGresult *res)
 	if (copybuf != NULL)
 		PQfreemem(copybuf);
 }
+
 
 static void
 ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res)
@@ -547,12 +558,7 @@ ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res)
 
 	/* Get the COPY data */
 	res = PQgetResult(conn);
-	if (res == NULL || PQresultStatus(res) != PGRES_COPY_OUT)
-	{
-		fprintf(stderr, "Failed to get copy out: %s\n",
-				PQerrorMessage(conn));
-		exit(1);
-	}
+	CheckPGResult(conn, res, "get copy out", PGRES_COPY_OUT);
 
 	while (1)
 	{
@@ -574,12 +580,7 @@ ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res)
 
 			/* Get another result to check the end of COPY */
 			res = PQgetResult(conn);
-			if (!res || PQresultStatus(res) != PGRES_COMMAND_OK)
-			{
-				fprintf(stderr, "Chunk receive error: %s\n",
-						PQerrorMessage(conn));
-				exit(1);
-			}
+			CheckPGResult(conn, res, "receive chunk", PGRES_COMMAND_OK);
 			break;
 		}
 		else if (r == -2)
@@ -743,13 +744,7 @@ BaseBackup()
 			/* Last resultset has been received. We're done here. */
 			break;
 
-		if (PQresultStatus(res) != PGRES_TUPLES_OK)
-		{
-			printf("Result status: %i\n", PQresultStatus(res));
-			fprintf(stderr, "Failed to get first result: %s\n",
-					PQerrorMessage(conn));
-			exit(1);
-		}
+		CheckPGResult(conn, res, "get first result", PGRES_TUPLES_OK);
 
 		if (tarmode)
 			ReceiveTarFile(conn, res);
