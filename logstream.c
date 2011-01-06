@@ -1,3 +1,14 @@
+/*
+ * logstream.c - receive a PostgreSQL 9.0+ replication stream and store
+ *				 it in files like a standard log archive directory
+ *
+ *
+ * Copyright (c) 2010-2011 PostgreSQL Global Development Group
+ * Copyright (c) 2010-2011 Magnus Hagander <magnus@hagander.net>
+ *
+ * This software is released under the PostgreSQL Licence
+ */
+
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>

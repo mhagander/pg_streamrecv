@@ -1,11 +1,10 @@
-
 /*
- * pg_streamrecv.c - receive a PostgreSQL 9.0+ replication stream and store
- *					 it in files like a standard log archive directory
+ * pg_streamrecv.c - receive streaming WAL logs or streaming base backups
+ *                   from a PostgreSQL walsender.
  *
  *
- * Copyright (c) 2010 PostgreSQL Global Development Group
- * Copyright (c) 2010 Magnus Hagander <magnus@hagander.net>
+ * Copyright (c) 2010-2011 PostgreSQL Global Development Group
+ * Copyright (c) 2010-2011 Magnus Hagander <magnus@hagander.net>
  *
  * This software is released under the PostgreSQL Licence
  */

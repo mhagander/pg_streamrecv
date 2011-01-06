@@ -1,3 +1,15 @@
+/*
+ * basebackup.c - receive a base backup using streaming replication protocol
+ *                and store it either in tar file(s) or unpack directly
+ *                into a directory.
+ *
+ *
+ * Copyright (c) 2010-2011 PostgreSQL Global Development Group
+ * Copyright (c) 2010-2011 Magnus Hagander <magnus@hagander.net>
+ *
+ * This software is released under the PostgreSQL Licence
+ */
+
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
