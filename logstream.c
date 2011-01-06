@@ -568,7 +568,7 @@ LogStreaming(void)
 		PQfreemem(copybuf);
 
 		/*
-		 * If there is a saved awayn file to remove when we've passed a
+		 * If there is a saved away file to remove when we've passed a
 		 * certain point in the WAL stream and we have actually passed
 		 * this point, then remove the file.
 		 */
