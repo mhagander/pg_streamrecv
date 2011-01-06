@@ -411,12 +411,7 @@ LogStreaming(void)
 		 * Get the current xlog location
 		 */
 		res = PQexec(conn, "SELECT pg_current_xlog_location()");
-		if (!res || PQresultStatus(res) != PGRES_TUPLES_OK)
-		{
-			fprintf(stderr, "Failed to get current xlog location: %s\n",
-					PQresultErrorMessage(res));
-			exit(1);
-		}
+		CheckPGResult(conn, res, "get current xlog location", PGRES_TUPLES_OK);
 		current_xlog = strdup(PQgetvalue(res, 0, 0));
 		if (verbose)
 			printf("Current xlog location: %s\n", current_xlog);
@@ -434,12 +429,7 @@ LogStreaming(void)
 	 * Identify the server and get the timeline
 	 */
 	res = PQexec(conn, "IDENTIFY_SYSTEM");
-	if (!res || PQresultStatus(res) != PGRES_TUPLES_OK)
-	{
-		fprintf(stderr, "Failed to identify system: %s\n",
-				PQresultErrorMessage(res));
-		exit(1);
-	}
+	CheckPGResult(conn, res, "identify system", PGRES_TUPLES_OK);
 	if (verbose)
 	{
 		printf("Systemid: %s\n", PQgetvalue(res, 0, 0));
@@ -452,6 +442,7 @@ LogStreaming(void)
 	 * Start streaming the log
 	 */
 	res = start_streaming(conn, current_xlog);
+	/* PostgreSQL 9.0 returns PGRES_COPY_OUT, 9.1+ returns PGRES_COPY_BOTH */
 	if (!res ||
 		(PQresultStatus(res) != PGRES_COPY_OUT && PQresultStatus(res) != PGRES_COPY_BOTH))
 	{
@@ -606,11 +597,7 @@ LogStreaming(void)
 	 * here.
 	 */
 	res = PQgetResult(conn);
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "Replication error: %s\n", PQresultErrorMessage(res));
-		exit(1);
-	}
+	CheckPGResult(conn, res, "end replicatoin stream", PGRES_COMMAND_OK);
 	PQfinish(conn);
 
 	if (verbose)
