@@ -10,7 +10,7 @@ LDFLAGS=-L$(shell $(PGC) --libdir) -lpq
 
 all: pg_streamrecv
 
-pg_streamrecv: pg_streamrecv.c
+pg_streamrecv: pg_streamrecv.o basebackup.o logstream.o
 
 clean:
-	rm -f pg_streamrecv.o pg_streamrecv
+	rm -f pg_streamrecv.o basebackup.o logstream.o pg_streamrecv
