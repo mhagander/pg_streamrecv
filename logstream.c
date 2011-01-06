@@ -35,7 +35,7 @@ int			remove_when_passed_size;
  * Initiate streaming replication at the given point in the WAL,
  * rounded off to the beginning of the segment it's in.
  */
-PGresult *
+static PGresult *
 start_streaming(PGconn *conn, char *xlogpos)
 {
 	unsigned int uxlogid;
@@ -96,7 +96,7 @@ open_walfile(XLogRecPtr startpoint)
  * (assumes the file has been closed)
  */
 static void
-rename_current_walfile()
+rename_current_walfile(void)
 {
 	char		src[256];
 	char		dest[256];
@@ -144,7 +144,7 @@ filename_to_logpos(char *filename, int add_segment)
  * 3. Start from the beginning of current WAL segment with a warning
  */
 static char *
-get_streaming_start_point()
+get_streaming_start_point(void)
 {
 	DIR		   *dir;
 	struct dirent *dirent;

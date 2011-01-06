@@ -32,7 +32,7 @@ Usage()
 {
 	printf("Usage:\n");
 	printf("\n");
-	printf("Streaming mode:\n");
+	printf("Log streaming mode:\n");
     printf(" pg_streamrecv -c <connectionstring> -d <directory> [-v]\n");
 	printf("\n");
 	printf(" -c <str>         libpq connection string to connect with\n");
